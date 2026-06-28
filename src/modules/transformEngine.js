@@ -1,70 +1,81 @@
 /**
- * TransformEngine: Applies non-destructive move/scale/rotate transforms to strokes.
- * Strokes retain their original point data; transforms are applied at render time.
+ * TransformEngine: Applies non-destructive move/scale/rotate transforms
+ * to both freehand strokes AND geometric shapes.
  */
 export class TransformEngine {
-  constructor(strokeManager) {
+  constructor(strokeManager, shapeManager = null) {
     this.strokeManager = strokeManager;
+    this.shapeManager = shapeManager;
 
     // Selection state
-    this.selectedStrokeId = null;
+    this.selectedId   = null;
+    this.selectedType = null; // 'stroke' | 'shape'
     this.lastX = null;
     this.lastY = null;
-    this.moveThreshold = 60; // px distance to grab
+    this.moveThreshold = 80; // px
 
     // Inertia
-    this.velocityX = 0;
-    this.velocityY = 0;
+    this.velocityX    = 0;
+    this.velocityY    = 0;
     this.inertiaDecay = 0.92;
     this.inertiaActive = false;
     this._inertiaFrame = null;
   }
+
+  // ─── backward-compat alias ────────────────────────────────────────────────
+  get selectedStrokeId() { return this.selectedType === 'stroke' ? this.selectedId : null; }
+  getSelectedStrokeId()  { return this.selectedType === 'stroke' ? this.selectedId : null; }
+  getSelectedShapeId()   { return this.selectedType === 'shape'  ? this.selectedId : null; }
+  getSelectedId()        { return this.selectedId; }
+  getSelectedType()      { return this.selectedType; }
 
   // ========================
   // SELECTION
   // ========================
 
   selectNearest(x, y) {
-    if (this.selectedStrokeId !== null) return; // already holding
+    if (this.selectedId !== null) return; // already holding
 
-    // Hit-test against transformed (visually rendered) positions
-    let closestId = null;
+    let closestId   = null;
+    let closestType = null;
     let closestDist = this.moveThreshold;
 
+    // --- Check strokes ---
     for (const stroke of this.strokeManager.getAllStrokes()) {
       const tPoints = TransformEngine.getTransformedPoints(stroke);
       for (let i = 0; i < tPoints.length - 1; i++) {
-        const dist = this._distToSegment(x, y, tPoints[i].x, tPoints[i].y, tPoints[i+1].x, tPoints[i+1].y);
-        if (dist < closestDist) {
-          closestDist = dist;
-          closestId = stroke.id;
-        }
+        const d = this._distToSegment(x, y, tPoints[i].x, tPoints[i].y, tPoints[i+1].x, tPoints[i+1].y);
+        if (d < closestDist) { closestDist = d; closestId = stroke.id; closestType = 'stroke'; }
       }
       if (tPoints.length === 1) {
-        const dx = x - tPoints[0].x, dy = y - tPoints[0].y;
-        const dist = Math.sqrt(dx*dx + dy*dy);
-        if (dist < closestDist) { closestDist = dist; closestId = stroke.id; }
+        const d = Math.hypot(x - tPoints[0].x, y - tPoints[0].y);
+        if (d < closestDist) { closestDist = d; closestId = stroke.id; closestType = 'stroke'; }
+      }
+    }
+
+    // --- Check shapes ---
+    if (this.shapeManager) {
+      for (const shape of this.shapeManager.getAllShapes()) {
+        const cx = shape.x + shape.transform.tx;
+        const cy = shape.y + shape.transform.ty;
+        const d  = Math.hypot(x - cx, y - cy);
+        // A shape is selectable if the pointer is within its bounding radius
+        const bounding = shape.size * shape.transform.scale + 40;
+        if (d < bounding && d < closestDist + bounding) {
+          closestDist = d;
+          closestId   = shape.id;
+          closestType = 'shape';
+        }
       }
     }
 
     if (closestId !== null) {
-      this.selectedStrokeId = closestId;
+      this.selectedId   = closestId;
+      this.selectedType = closestType;
       this.lastX = x;
       this.lastY = y;
       this._stopInertia();
     }
-  }
-
-  _distToSegment(px, py, x1, y1, x2, y2) {
-    const dx = x2 - x1, dy = y2 - y1;
-    if (dx === 0 && dy === 0) return Math.sqrt((px-x1)**2 + (py-y1)**2);
-    const t = Math.max(0, Math.min(1, ((px-x1)*dx + (py-y1)*dy) / (dx*dx + dy*dy)));
-    const nx = x1 + t*dx, ny = y1 + t*dy;
-    return Math.sqrt((px-nx)**2 + (py-ny)**2);
-  }
-
-  getSelectedStrokeId() {
-    return this.selectedStrokeId;
   }
 
   // ========================
@@ -72,21 +83,19 @@ export class TransformEngine {
   // ========================
 
   handleMove(x, y) {
-    if (this.selectedStrokeId === null) {
+    if (this.selectedId === null) {
       this.selectNearest(x, y);
       return;
     }
 
-    const stroke = this.strokeManager.getStroke(this.selectedStrokeId);
-    if (!stroke) return;
+    const item = this._getSelected();
+    if (!item) return;
 
     if (this.lastX !== null && this.lastY !== null) {
       const dx = x - this.lastX;
       const dy = y - this.lastY;
-      stroke.transform.tx += dx;
-      stroke.transform.ty += dy;
-
-      // Track velocity for inertia
+      item.transform.tx += dx;
+      item.transform.ty += dy;
       this.velocityX = dx;
       this.velocityY = dy;
     }
@@ -99,18 +108,13 @@ export class TransformEngine {
   // ========================
 
   handleScale(pinchDelta) {
-    if (this.selectedStrokeId === null) return;
+    if (this.selectedId === null) return;
+    const item = this._getSelected();
+    if (!item) return;
 
-    const stroke = this.strokeManager.getStroke(this.selectedStrokeId);
-    if (!stroke) return;
-
-    // pinchDelta is the change in normalized pinch distance
-    // Multiply by a sensitivity factor to make it feel responsive
     const scaleFactor = 1 + (pinchDelta * 8);
-    stroke.transform.scale *= scaleFactor;
-
-    // Clamp scale
-    stroke.transform.scale = Math.max(0.1, Math.min(5, stroke.transform.scale));
+    item.transform.scale *= scaleFactor;
+    item.transform.scale = Math.max(0.1, Math.min(5, item.transform.scale));
   }
 
   // ========================
@@ -118,24 +122,18 @@ export class TransformEngine {
   // ========================
 
   handleRotate(angleDelta) {
-    if (this.selectedStrokeId === null) return;
-
-    const stroke = this.strokeManager.getStroke(this.selectedStrokeId);
-    if (!stroke) return;
-
-    stroke.transform.rotation += angleDelta;
+    if (this.selectedId === null) return;
+    const item = this._getSelected();
+    if (!item) return;
+    item.transform.rotation += angleDelta;
   }
 
-  /**
-   * Snap the selected stroke's rotation to nearest 45° increment.
-   */
   snapRotation() {
-    if (this.selectedStrokeId === null) return;
-    const stroke = this.strokeManager.getStroke(this.selectedStrokeId);
-    if (!stroke) return;
-
-    const snap = Math.PI / 4; // 45 degrees
-    stroke.transform.rotation = Math.round(stroke.transform.rotation / snap) * snap;
+    if (this.selectedId === null) return;
+    const item = this._getSelected();
+    if (!item) return;
+    const snap = Math.PI / 4;
+    item.transform.rotation = Math.round(item.transform.rotation / snap) * snap;
   }
 
   // ========================
@@ -143,46 +141,57 @@ export class TransformEngine {
   // ========================
 
   releaseAll() {
-    if (this.selectedStrokeId !== null) {
-      // Snap rotation on release
+    if (this.selectedId !== null) {
       this.snapRotation();
-
-      // Start inertia if there's velocity
       if (Math.abs(this.velocityX) > 0.5 || Math.abs(this.velocityY) > 0.5) {
         this._startInertia();
       }
     }
-
-    this.selectedStrokeId = null;
+    this.selectedId   = null;
+    this.selectedType = null;
     this.lastX = null;
     this.lastY = null;
   }
 
+  // ========================
+  // PRIVATE HELPERS
+  // ========================
+
+  _getSelected() {
+    if (this.selectedType === 'stroke') return this.strokeManager.getStroke(this.selectedId);
+    if (this.selectedType === 'shape' && this.shapeManager) return this.shapeManager.getShape(this.selectedId);
+    return null;
+  }
+
+  _distToSegment(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1;
+    if (dx === 0 && dy === 0) return Math.hypot(px - x1, py - y1);
+    const t = Math.max(0, Math.min(1, ((px-x1)*dx + (py-y1)*dy) / (dx*dx + dy*dy)));
+    return Math.hypot(px - (x1 + t*dx), py - (y1 + t*dy));
+  }
+
   _startInertia() {
-    const strokeId = this.selectedStrokeId;
+    const selId   = this.selectedId;
+    const selType = this.selectedType;
     this.inertiaActive = true;
 
     const tick = () => {
-      const stroke = this.strokeManager.getStroke(strokeId);
-      if (!stroke || !this.inertiaActive) {
-        this.inertiaActive = false;
-        return;
-      }
+      const item = selType === 'stroke'
+        ? this.strokeManager.getStroke(selId)
+        : this.shapeManager?.getShape(selId);
+      if (!item || !this.inertiaActive) { this.inertiaActive = false; return; }
 
       this.velocityX *= this.inertiaDecay;
       this.velocityY *= this.inertiaDecay;
-
-      stroke.transform.tx += this.velocityX;
-      stroke.transform.ty += this.velocityY;
+      item.transform.tx += this.velocityX;
+      item.transform.ty += this.velocityY;
 
       if (Math.abs(this.velocityX) < 0.1 && Math.abs(this.velocityY) < 0.1) {
         this.inertiaActive = false;
         return;
       }
-
       this._inertiaFrame = requestAnimationFrame(tick);
     };
-
     this._inertiaFrame = requestAnimationFrame(tick);
   }
 
@@ -197,41 +206,21 @@ export class TransformEngine {
   }
 
   // ========================
-  // STATIC UTILITY: Apply transform to points for rendering
+  // STATIC UTILITY
   // ========================
 
   static getTransformedPoints(stroke) {
     const { tx, ty, scale, rotation } = stroke.transform;
-    
-    // Calculate center of original points
     let cx = 0, cy = 0;
-    for (const p of stroke.points) {
-      cx += p.x;
-      cy += p.y;
-    }
+    for (const p of stroke.points) { cx += p.x; cy += p.y; }
     cx /= stroke.points.length;
     cy /= stroke.points.length;
 
     return stroke.points.map(p => {
-      // Translate to origin
-      let x = p.x - cx;
-      let y = p.y - cy;
-
-      // Scale
-      x *= scale;
-      y *= scale;
-
-      // Rotate
-      const cos = Math.cos(rotation);
-      const sin = Math.sin(rotation);
-      const rx = x * cos - y * sin;
-      const ry = x * sin + y * cos;
-
-      // Translate back + apply position offset
-      return {
-        x: rx + cx + tx,
-        y: ry + cy + ty,
-      };
+      let x = (p.x - cx) * scale;
+      let y = (p.y - cy) * scale;
+      const cos = Math.cos(rotation), sin = Math.sin(rotation);
+      return { x: x*cos - y*sin + cx + tx, y: x*sin + y*cos + cy + ty };
     });
   }
 }
