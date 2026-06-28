@@ -4,6 +4,7 @@ import { StrokeManager } from '../modules/strokeManager';
 import { ShapeManager } from '../modules/shapeManager';
 import { InteractionEngine } from '../modules/interactionEngine';
 import { TransformEngine } from '../modules/transformEngine';
+import { StrokeRefiner } from '../modules/strokeRefiner';
 
 const DEFAULT_SHAPE_SIZE = 80; // px radius when placing a shape
 
@@ -16,34 +17,38 @@ const DrawingCanvas = forwardRef(({
   controlPinchDelta,
   controlAngleDelta,
   activeShape,           // null = freehand; 'circle'|'rectangle'|etc = shape mode
+  autoRefine,            // boolean — snap freehand → shape on gesture end
 }, ref) => {
-  const canvasRef      = useRef(null);
-  const engineRef      = useRef(null);
-  const managerRef     = useRef(null);
-  const shapeManagerRef= useRef(null);
-  const interactionRef = useRef(null);
-  const transformRef   = useRef(null);
+  const canvasRef       = useRef(null);
+  const engineRef       = useRef(null);
+  const managerRef      = useRef(null);
+  const shapeManagerRef = useRef(null);
+  const interactionRef  = useRef(null);
+  const transformRef    = useRef(null);
 
   // Freehand path
-  const currentPathRef = useRef(null);
-  const lastPointRef   = useRef(null);
+  const currentPathRef  = useRef(null);
+  const lastPointRef    = useRef(null);
 
-  // Ghost shape (follows fingertip when a shape is selected)
-  const ghostShapeRef  = useRef(null);
+  // Ghost shape (follows fingertip when a shape type is selected)
+  const ghostShapeRef   = useRef(null);
 
-  // Whether we already placed a shape in this DRAW gesture
-  const shapePlacedRef = useRef(false);
+  // Prevent placing a shape on every frame of DRAW gesture
+  const shapePlacedRef  = useRef(false);
 
-  // Control gesture ref for rendering
+  // Refs so the render loop & effect closures stay in sync
   const controlGestureRef = useRef('CTRL_IDLE');
+  const autoRefineRef     = useRef(autoRefine);
+  useEffect(() => { autoRefineRef.current = autoRefine; }, [autoRefine]);
 
+  // ── Imperative handle ────────────────────────────────────────────────────
   useImperativeHandle(ref, () => ({
     clear: () => {
       managerRef.current?.clear();
       shapeManagerRef.current?.clear();
     },
     undo: () => {
-      // Undo last shape first, then last stroke
+      // Prefer undoing last shape (most recent action)
       if (shapeManagerRef.current?.getAllShapes().length > 0) {
         shapeManagerRef.current.undo();
       } else {
@@ -55,9 +60,15 @@ const DrawingCanvas = forwardRef(({
       shapeManagerRef.current?.redo();
     },
     save: () => engineRef.current?.saveAsImage(),
+    addText: ({ text, fontFamily, fontSize, color }) => {
+      if (!shapeManagerRef.current || !canvasRef.current) return;
+      const x = canvasRef.current.width  / 2;
+      const y = canvasRef.current.height / 2;
+      shapeManagerRef.current.addText(text, fontFamily, fontSize, x, y, color);
+    },
   }));
 
-  // ── Setup ──────────────────────────────────────────────────────────────────
+  // ── Setup canvas + render loop ───────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     canvas.width  = window.innerWidth;
@@ -69,12 +80,11 @@ const DrawingCanvas = forwardRef(({
     transformRef.current    = new TransformEngine(managerRef.current, shapeManagerRef.current);
     engineRef.current       = new DrawingEngine(canvas);
 
-    let animationFrameId;
-    const renderLoop = () => {
+    let animId;
+    const loop = () => {
       if (engineRef.current && managerRef.current && shapeManagerRef.current) {
-        const selId   = transformRef.current?.getSelectedId()   ?? interactionRef.current?.getSelectedStrokeId() ?? null;
-        const selType = transformRef.current?.getSelectedType() ?? (selId ? 'stroke' : null);
-
+        const selId   = transformRef.current?.getSelectedId()   ?? null;
+        const selType = transformRef.current?.getSelectedType() ?? null;
         engineRef.current.draw(
           managerRef.current.getAllStrokes(),
           shapeManagerRef.current.getAllShapes(),
@@ -85,104 +95,93 @@ const DrawingCanvas = forwardRef(({
           controlGestureRef.current,
         );
       }
-      animationFrameId = requestAnimationFrame(renderLoop);
+      animId = requestAnimationFrame(loop);
     };
-    renderLoop();
+    loop();
 
-    const handleResize = () => {
+    const onResize = () => {
       canvas.width  = window.innerWidth;
       canvas.height = window.innerHeight;
     };
-    window.addEventListener('resize', handleResize);
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      cancelAnimationFrame(animationFrameId);
-    };
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); cancelAnimationFrame(animId); };
   }, []);
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // ── Helper: finalise freehand path ──────────────────────────────────────
   const saveCurrentPath = () => {
-    if (currentPathRef.current) {
-      managerRef.current.addStroke(
-        currentPathRef.current.points,
-        currentPathRef.current.color,
-        currentPathRef.current.lineWidth,
-        currentPathRef.current.glowIntensity,
-      );
-      currentPathRef.current = null;
-      lastPointRef.current   = null;
+    if (!currentPathRef.current) return;
+    const path = currentPathRef.current;
+    currentPathRef.current = null;
+    lastPointRef.current   = null;
+    if (path.points.length < 2) return;
+
+    const stroke = managerRef.current.addStroke(
+      path.points, path.color, path.lineWidth, path.glowIntensity,
+    );
+
+    // Auto-refine: try to replace with a clean geometric shape
+    if (autoRefineRef.current) {
+      const result = StrokeRefiner.refine(path.points);
+      if (result) {
+        managerRef.current.removeStroke(stroke.id);
+        shapeManagerRef.current.addShape(
+          result.shapeType, result.x, result.y, result.size,
+          path.color, path.lineWidth, path.glowIntensity,
+        );
+      }
     }
   };
 
-  // ── PRIMARY HAND: Drawing / shape placement ────────────────────────────────
+  // ── PRIMARY HAND: Drawing / erasing / shape placement ───────────────────
   useEffect(() => {
-    if (!landmark || !managerRef.current || !interactionRef.current) return;
+    if (!landmark || !managerRef.current) return;
 
-    const x = (1 - landmark.x) * canvasRef.current.width;
-    const y = landmark.y        * canvasRef.current.height;
+    const canvas = canvasRef.current;
+    const x = (1 - landmark.x) * canvas.width;
+    const y =      landmark.y  * canvas.height;
 
-    // ── Shape mode ──────────────────────────────────────────────────────────
+    // ── Shape-placement mode ─────────────────────────────────────────────
     if (activeShape) {
-      // Always update ghost
       ghostShapeRef.current = {
-        shapeType: activeShape,
-        x,
-        y,
+        shapeType: activeShape, x, y,
         size: DEFAULT_SHAPE_SIZE,
-        color:     settings.color,
-        lineWidth: settings.lineWidth,
+        color:         settings.color,
+        lineWidth:     settings.lineWidth,
         glowIntensity: settings.glowIntensity,
       };
 
       if (gesture === 'DRAW') {
         if (!shapePlacedRef.current) {
-          // Place shape on first DRAW frame
           shapeManagerRef.current.addShape(
-            activeShape, x, y,
-            DEFAULT_SHAPE_SIZE,
-            settings.color,
-            settings.lineWidth,
-            settings.glowIntensity,
+            activeShape, x, y, DEFAULT_SHAPE_SIZE,
+            settings.color, settings.lineWidth, settings.glowIntensity,
           );
           shapePlacedRef.current = true;
         }
       } else {
         shapePlacedRef.current = false;
-        // Erase still works on shapes
-        if (gesture === 'ERASE') {
-          // Remove shape if eraser overlaps its centre
-          for (const shape of shapeManagerRef.current.getAllShapes()) {
-            const cx = shape.x + shape.transform.tx;
-            const cy = shape.y + shape.transform.ty;
-            if (Math.hypot(x - cx, y - cy) < shape.size * shape.transform.scale + 30) {
-              shapeManagerRef.current.removeShape(shape.id);
-              break;
-            }
-          }
-        }
-        if (gesture === 'CLEAR') {
-          shapeManagerRef.current.clear();
-          managerRef.current.clear();
-        }
+        if (gesture === 'ERASE') _eraseNearShapes(x, y);
+        if (gesture === 'CLEAR') { shapeManagerRef.current.clear(); managerRef.current.clear(); }
       }
       return;
     }
 
-    // ── Freehand mode ────────────────────────────────────────────────────────
+    // ── Freehand mode ────────────────────────────────────────────────────
     ghostShapeRef.current  = null;
     shapePlacedRef.current = false;
 
     switch (gesture) {
-      case 'DRAW':
+      case 'DRAW': {
         if (!currentPathRef.current) {
           currentPathRef.current = {
             points: [{ x, y }],
-            color:        settings.color,
-            lineWidth:    settings.lineWidth,
+            color:         settings.color,
+            lineWidth:     settings.lineWidth,
             glowIntensity: settings.glowIntensity,
           };
           lastPointRef.current = { x, y };
         } else {
+          // Smooth interpolation
           const sf = 0.15;
           const sx = lastPointRef.current.x * sf + x * (1 - sf);
           const sy = lastPointRef.current.y * sf + y * (1 - sf);
@@ -190,34 +189,36 @@ const DrawingCanvas = forwardRef(({
           lastPointRef.current = { x: sx, y: sy };
         }
         break;
-
+      }
       case 'ERASE':
         saveCurrentPath();
         interactionRef.current.handleErase(x, y);
-        // Also erase nearby shapes
-        for (const shape of shapeManagerRef.current.getAllShapes()) {
-          const cx = shape.x + shape.transform.tx;
-          const cy = shape.y + shape.transform.ty;
-          if (Math.hypot(x - cx, y - cy) < shape.size * shape.transform.scale + 30) {
-            shapeManagerRef.current.removeShape(shape.id);
-            break;
-          }
-        }
+        _eraseNearShapes(x, y);
         break;
-
       case 'CLEAR':
         saveCurrentPath();
         managerRef.current.clear();
         shapeManagerRef.current.clear();
         break;
-
       default:
         saveCurrentPath();
         break;
     }
   }, [gesture, landmark, settings, activeShape]);
 
-  // ── SECONDARY HAND: Control gestures ──────────────────────────────────────
+  // Helper: erase shapes/text near point
+  function _eraseNearShapes(x, y) {
+    for (const shape of shapeManagerRef.current.getAllShapes()) {
+      const cx = shape.x + shape.transform.tx;
+      const cy = shape.y + shape.transform.ty;
+      if (Math.hypot(x - cx, y - cy) < shape.size * shape.transform.scale + 35) {
+        shapeManagerRef.current.removeShape(shape.id);
+        break;
+      }
+    }
+  }
+
+  // ── SECONDARY HAND: Transform controls ──────────────────────────────────
   useEffect(() => {
     if (!transformRef.current) return;
     controlGestureRef.current = controlGesture || 'CTRL_IDLE';
@@ -227,8 +228,9 @@ const DrawingCanvas = forwardRef(({
       return;
     }
 
-    const x = (1 - controlLandmark.x) * canvasRef.current.width;
-    const y = controlLandmark.y        * canvasRef.current.height;
+    const canvas = canvasRef.current;
+    const x = (1 - controlLandmark.x) * canvas.width;
+    const y =      controlLandmark.y  * canvas.height;
 
     switch (controlGesture) {
       case 'CTRL_MOVE':
@@ -253,8 +255,7 @@ const DrawingCanvas = forwardRef(({
       ref={canvasRef}
       style={{
         position:      'fixed',
-        top:           0,
-        left:          0,
+        top: 0, left: 0,
         zIndex:        10,
         pointerEvents: 'none',
       }}

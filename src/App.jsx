@@ -34,6 +34,7 @@ function App() {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [canvasMode, setCanvasMode] = useState(false);
   const [activeShape, setActiveShape] = useState(null); // null = freehand
+  const [autoRefine, setAutoRefine] = useState(false);
 
   const canvasRef = useRef(null);
   const interpreter = useMemo(() => new GestureInterpreter(), []);
@@ -119,6 +120,7 @@ function App() {
         controlPinchDelta={controlPinchDelta}
         controlAngleDelta={controlAngleDelta}
         activeShape={activeShape}
+        autoRefine={autoRefine}
       />
 
       <ControlPanel
@@ -137,6 +139,9 @@ function App() {
         onToggleCanvasMode={() => setCanvasMode(!canvasMode)}
         activeShape={activeShape}
         onShapeSelect={setActiveShape}
+        autoRefine={autoRefine}
+        onToggleAutoRefine={() => setAutoRefine(v => !v)}
+        onAddText={(cfg) => canvasRef.current?.addText(cfg)}
       />
 
       <HelpPanel isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />

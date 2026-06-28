@@ -56,8 +56,28 @@ export class ShapeManager {
     this.redoStack = [];
   }
 
+  addText(text, fontFamily, fontSize, x, y, color) {
+    // Approximate bounding size for hit-test (half the text width)
+    const size = Math.max(fontSize * text.length * 0.3, fontSize * 0.6);
+    const obj = {
+      id: this._nextId++,
+      kind: 'text',
+      text,
+      fontFamily,
+      fontSize,
+      x,
+      y,
+      size,
+      color,
+      transform: { tx: 0, ty: 0, scale: 1, rotation: 0 },
+    };
+    this.shapes.push(obj);
+    this.redoStack = [];
+    return obj;
+  }
+
   /**
-   * Find the nearest shape centre within `threshold` px.
+   * Find the nearest shape OR text centre within `threshold` px.
    * Returns shape id or null.
    */
   findNearestShape(x, y, threshold) {
@@ -68,8 +88,7 @@ export class ShapeManager {
       const cx = shape.x + shape.transform.tx;
       const cy = shape.y + shape.transform.ty;
       const effectiveSize = shape.size * shape.transform.scale;
-      const dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
-      // "grab" if within the shape's bounding circle
+      const dist = Math.hypot(x - cx, y - cy);
       if (dist < Math.max(effectiveSize + 30, minDist)) {
         if (dist < minDist + effectiveSize) {
           minDist = dist;

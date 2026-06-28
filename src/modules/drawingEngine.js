@@ -66,6 +66,11 @@ export class DrawingEngine {
 
     // ── Geometric shapes ────────────────────────────────────────────────────
     shapes.forEach(shape => {
+      if (shape.kind === 'text') {
+        const isSelected = selectedType === 'shape' && selectedId !== null && shape.id === Number(selectedId);
+        this._drawText(ctx, shape, isSelected, controlGesture);
+        return;
+      }
       const isSelected = selectedType === 'shape' && selectedId !== null && shape.id === Number(selectedId);
       this._drawShape(ctx, shape, isSelected, controlGesture);
     });
@@ -124,6 +129,54 @@ export class DrawingEngine {
                     : controlGesture === 'CTRL_SCALE'  ? 'rgba(0,255,200,0.9)'
                     : controlGesture === 'CTRL_MOVE'   ? 'rgba(100,180,255,0.9)'
                     : 'rgba(255,255,255,0.6)';
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  _drawText(ctx, obj, isSelected = false, controlGesture = 'CTRL_IDLE') {
+    const { x, y, text, fontFamily, fontSize, color, transform } = obj;
+    const { tx, ty, scale, rotation } = transform;
+    const cx = x + tx;
+    const cy = y + ty;
+    const scaledSize = fontSize * scale;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(rotation);
+
+    const drawColor = isSelected ? '#ffffff' : color;
+    ctx.font        = `600 ${scaledSize}px "${fontFamily}", sans-serif`;
+    ctx.fillStyle   = drawColor;
+    ctx.textAlign   = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowBlur  = isSelected ? 35 : 18;
+    ctx.shadowColor = isSelected ? '#ffffff' : color;
+
+    ctx.fillText(text, 0, 0);
+    ctx.shadowBlur = 0;
+
+    if (isSelected) {
+      const metrics = ctx.measureText(text);
+      const w = metrics.width + 24;
+      const h = scaledSize + 24;
+      ctx.beginPath();
+      ctx.rect(-w / 2, -h / 2, w, h);
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.lineWidth   = 1.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Control mode dot
+      const dotColor = controlGesture === 'CTRL_ROTATE' ? 'rgba(255,165,0,0.9)'
+                     : controlGesture === 'CTRL_SCALE'  ? 'rgba(0,255,200,0.9)'
+                     : controlGesture === 'CTRL_MOVE'   ? 'rgba(100,180,255,0.9)'
+                     : 'rgba(255,255,255,0.6)';
+      ctx.beginPath();
+      ctx.arc(0, -(h / 2 + 10), 5, 0, 2 * Math.PI);
+      ctx.fillStyle = dotColor;
       ctx.fill();
     }
 
