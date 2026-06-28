@@ -45,6 +45,7 @@ export class GestureInterpreter {
         gesture: GESTURES.IDLE,
         landmark: null,      // Index fingertip (landmark 8)
         fingertips: [],
+        allLandmarks: [],    // All 21 landmarks for skeleton rendering
       },
       secondary: {
         gesture: CONTROL_GESTURES.IDLE,
@@ -98,6 +99,7 @@ export class GestureInterpreter {
       output.primary.gesture = this.primaryController.update(primaryLandmarks);
       output.primary.landmark = primaryLandmarks[8]; // Index fingertip
       output.primary.fingertips = [4, 8, 12, 16, 20].map(i => primaryLandmarks[i]);
+      output.primary.allLandmarks = primaryLandmarks; // All 21 points
     }
 
     // --- Process Secondary Hand ---

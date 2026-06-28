@@ -3,6 +3,7 @@ import CameraView from './components/CameraView';
 import DrawingCanvas from './components/DrawingCanvas';
 import HelpPanel from './components/HelpPanel';
 import ControlPanel from './components/ControlPanel';
+import HandSkeleton from './components/HandSkeleton';
 import { GestureInterpreter, CONTROL_GESTURES } from './modules/gestureInterpreter';
 import { GESTURES } from './modules/gestureController';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -19,6 +20,7 @@ function App() {
   const [gesture, setGesture] = useState(GESTURES.IDLE);
   const [landmark, setLandmark] = useState(null);
   const [fingertips, setFingertips] = useState([]);
+  const [allHandLandmarks, setAllHandLandmarks] = useState(null);
 
   // Secondary hand (control)
   const [controlGesture, setControlGesture] = useState(CONTROL_GESTURES.IDLE);
@@ -30,6 +32,7 @@ function App() {
   const [cameraVisible, setCameraVisible] = useState(true);
   const [gesturesEnabled, setGesturesEnabled] = useState(true);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const [canvasMode, setCanvasMode] = useState(false);
 
   const canvasRef = useRef(null);
   const interpreter = useMemo(() => new GestureInterpreter(), []);
@@ -39,6 +42,7 @@ function App() {
       setGesture(GESTURES.IDLE);
       setLandmark(null);
       setFingertips([]);
+      setAllHandLandmarks(null);
       setControlGesture(CONTROL_GESTURES.IDLE);
       setControlLandmark(null);
       setControlFingertips([]);
@@ -51,6 +55,7 @@ function App() {
     setGesture(primary.gesture);
     setLandmark(primary.landmark);
     setFingertips(primary.fingertips);
+    setAllHandLandmarks(primary.allLandmarks || null);
 
     // Secondary hand
     setControlGesture(secondary.gesture);
@@ -77,10 +82,30 @@ function App() {
 
   return (
     <div className="app-container">
-      {cameraVisible && (
-        <CameraView
-          onResults={onResults}
-        />
+      {/* CameraView is ALWAYS mounted so hand tracking never stops.
+          showFeed controls whether the video is visually visible. */}
+      <CameraView
+        onResults={onResults}
+        showFeed={cameraVisible && !canvasMode}
+      />
+
+      {/* Canvas mode: clean dark background shown behind drawing canvas */}
+      {canvasMode && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          zIndex: -1,
+          background: 'linear-gradient(135deg, #0a0015 0%, #050510 50%, #000208 100%)',
+          pointerEvents: 'none',
+        }}>
+          {/* Subtle dot grid */}
+          <div style={{
+            position: 'absolute',
+            inset: 0,
+            backgroundImage: 'radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px)',
+            backgroundSize: '40px 40px',
+          }} />
+        </div>
       )}
 
       <DrawingCanvas
@@ -106,6 +131,8 @@ function App() {
         gestureVisible={gesturesEnabled}
         onToggleGestures={() => setGesturesEnabled(!gesturesEnabled)}
         onHelp={() => setIsHelpOpen(true)}
+        canvasMode={canvasMode}
+        onToggleCanvasMode={() => setCanvasMode(!canvasMode)}
       />
 
       <HelpPanel isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
@@ -124,8 +151,17 @@ function App() {
         )}
       </AnimatePresence>
 
-      {/* Primary Hand Fingertip Indicators */}
-      {fingertips.map((tip, i) => {
+      {/* Canvas mode: show full hand skeleton instead of floating dots */}
+      {canvasMode && (
+        <HandSkeleton
+          allLandmarks={allHandLandmarks}
+          color={settings.color}
+          gesture={gesture}
+        />
+      )}
+
+      {/* Primary Hand Fingertip Indicators — only shown in camera mode */}
+      {!canvasMode && fingertips.map((tip, i) => {
         if (!tip) return null;
         const x = (1 - tip.x) * window.innerWidth;
         const y = tip.y * window.innerHeight;

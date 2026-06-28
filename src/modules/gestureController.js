@@ -11,6 +11,9 @@ export class GestureController {
     this.currentGesture = GESTURES.IDLE;
     this.lastGesture = GESTURES.IDLE;
     this.gestureStartTime = Date.now();
+    // CLEAR needs a sustained hold to avoid accidental triggers
+    this.clearHoldStart = null;
+    this.CLEAR_HOLD_MS = 1500;
   }
 
   detectGesture(landmarks) {
@@ -40,10 +43,15 @@ export class GestureController {
       return GESTURES.ERASE;
     }
 
-    // 2. Fist (No fingers up) -> CLEAR (Maybe needs a hold time)
+    // 2. Fist (No fingers up) -> CLEAR — only after hold
     if (!indexUp && !middleUp && !ringUp && !pinkyUp && !thumbUp) {
-      return GESTURES.CLEAR;
+      if (this.clearHoldStart === null) {
+        this.clearHoldStart = Date.now();
+      }
+      const held = Date.now() - this.clearHoldStart;
+      return held >= this.CLEAR_HOLD_MS ? GESTURES.CLEAR : GESTURES.IDLE;
     }
+    this.clearHoldStart = null;
 
     // 3. Two Fingers (Index + Middle) -> MOVE
     // Ignore thumb as thumb position can be ambiguous
